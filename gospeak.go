@@ -18,6 +18,7 @@ var ShutUp bool
 var SkipImports bool
 var TargetFunction string
 var SayOut string
+var VerboseOutput bool
 
 var speechBuffer strings.Builder
 
@@ -150,7 +151,9 @@ func speak(speech string) {
 	if ShutUp {
 		return
 	}
-	fmt.Printf("Saying: %s\n", speech)
+	if VerboseOutput {
+		fmt.Printf("Saying: %s\n", speech)
+	}
 	speechBuffer.WriteString(speech)
 	speechBuffer.WriteString("[[slnc 200]]\n")
 }
@@ -220,7 +223,9 @@ func speakDeclaration(d ast.Decl) {
 			return
 		}
 		speak("function " + symbolToSpeech(v.Name.String()))
-		fmt.Printf("function name: %s\n", v.Name.String())
+		if VerboseOutput {
+			fmt.Printf("function name: %s\n", v.Name.String())
+		}
 		speakFieldList(v.Type.Params, "taking ", "parameter")
 		speakFieldList(v.Type.Results, "and returning ", "value")
 		speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))
@@ -269,9 +274,7 @@ func speakField(field *ast.Field) {
 	if len(field.Names) > 1 {
 		as = "all as"
 	}
-	fmt.Printf("There are %d names in this field\n", len(field.Names))
 	for _, fn := range field.Names {
-		fmt.Printf("Field name = %s\n", fn.String())
 		speak(symbolToSpeech(fn.String()))
 	}
 	speak(as)

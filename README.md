@@ -9,8 +9,10 @@ without reworking the speak function.
 
 To run:
 
-```go get github.com/gospeak/...```
-```saygo [options] gofiles```
+```
+go get github.com/gospeak/...
+saygo [options] gofiles
+```
 
 * *-q* option to disable the speaking if you are just debugging the language processing.
 * *-func funcname* to only read out a specific function

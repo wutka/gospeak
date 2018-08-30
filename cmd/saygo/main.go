@@ -2,7 +2,7 @@ package main
 
 import (
 	"flag"
-	"go-to-speech/pkg"
+	"github.com/wutka/gospeak"
 )
 
 func main() {
@@ -13,12 +13,12 @@ func main() {
 
 	flag.Parse()
 
-	pkg.ShutUp = *quietFlag
-	pkg.SkipImports = *skipImportsFlag
-	pkg.TargetFunction = *functionNameFlag
-	pkg.SayOut = *outputFlag
+	gospeak.ShutUp = *quietFlag
+	gospeak.SkipImports = *skipImportsFlag
+	gospeak.TargetFunction = *functionNameFlag
+	gospeak.SayOut = *outputFlag
 
 	for _, filename := range flag.Args() {
-		pkg.SpeakGoFile(filename)
+		gospeak.SpeakGoFile(filename)
 	}
 }

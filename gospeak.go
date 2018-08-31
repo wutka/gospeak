@@ -17,6 +17,7 @@ import (
 type GoSpeaker interface {
 	SpeakGoFile(filename string)
 	SpeakGoFunction(filename string, function string)
+	SpeakGoString(s string)
 }
 
 type goSpeaker struct {
@@ -28,6 +29,7 @@ type goSpeaker struct {
 
 	speechBuffer strings.Builder
 	fileSet      *token.FileSet
+	fileBuffer   string
 }
 
 func MakeGoSpeakerDefault() GoSpeaker {
@@ -53,6 +55,25 @@ func (gsp *goSpeaker) SpeakGoFile(filename string) {
 	gsp.fileSet = token.NewFileSet() // positions are relative to fset
 
 	f, err := parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
+	if err != nil && f == nil {
+		panic(err)
+	}
+	if err != nil {
+		fmt.Printf("Warning: file had compile errors: %+v\n", err)
+	}
+
+	gsp.speakFile(f)
+
+	gsp.speakBuffer()
+}
+
+func (gsp *goSpeaker) SpeakGoString(s string) {
+
+	gsp.fileBuffer = s
+
+	gsp.fileSet = token.NewFileSet() // positions are relative to fset
+
+	f, err := parser.ParseFile(gsp.fileSet, "buffer", []byte(s), parser.ParseComments)
 	if err != nil && f == nil {
 		panic(err)
 	}
@@ -126,6 +147,10 @@ func (gsp *goSpeaker) getFileString(from, to token.Pos) string {
 		return ""
 	} else if bytesToRead == 0 {
 		return ""
+	}
+
+	if gsp.fileBuffer != "" {
+		return gsp.fileBuffer[fromPosition.Offset : toPosition.Offset+1]
 	}
 
 	f, err := os.Open(fromPosition.Filename)
@@ -240,20 +265,20 @@ func (gsp *goSpeaker) speak(speech string) {
 	if gsp.verboseOutput {
 		fmt.Printf("Saying: %s\n", speech)
 	}
-	if gsp.quiet {
-		return
-	}
 	gsp.speechBuffer.WriteString(speech)
-	gsp.speechBuffer.WriteString("[[slnc 200]]\n")
+	gsp.speechBuffer.WriteString("{pause}\n")
 }
 
 func (gsp *goSpeaker) speakBuffer() {
+	if gsp.quiet {
+		return
+	}
 	tempFile, err := ioutil.TempFile(".", "gospeech")
 	if err != nil {
 		fmt.Printf("Unable to create temp file: %+v\n", err)
 		return
 	}
-	tempFile.WriteString(gsp.speechBuffer.String())
+	tempFile.WriteString(strings.Replace(gsp.speechBuffer.String(), "{pause}", "[[slnc 200]]", -1))
 	tempFile.Close()
 	defer os.Remove(tempFile.Name())
 	var cmd *exec.Cmd

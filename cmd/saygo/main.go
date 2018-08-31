@@ -14,13 +14,13 @@ func main() {
 
 	flag.Parse()
 
-	gospeak.ShutUp = *quietFlag
-	gospeak.SkipImports = *skipImportsFlag
-	gospeak.TargetFunction = *functionNameFlag
-	gospeak.SayOut = *outputFlag
-	gospeak.VerboseOutput = *verboseFlag
+	speaker := gospeak.MakeGoSpeaker(*quietFlag, *verboseFlag, *skipImportsFlag, *outputFlag)
 
 	for _, filename := range flag.Args() {
-		gospeak.SpeakGoFile(filename)
+		if *functionNameFlag == "" {
+			speaker.SpeakGoFile(filename)
+		} else {
+			speaker.SpeakGoFunction(filename, *functionNameFlag)
+		}
 	}
 }

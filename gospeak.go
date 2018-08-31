@@ -14,25 +14,45 @@ import (
 	"unicode/utf8"
 )
 
-var ShutUp bool
-var SkipImports bool
-var TargetFunction string
-var SayOut string
-var VerboseOutput bool
+type GoSpeaker interface {
+	SpeakGoFile(filename string)
+	SpeakGoFunction(filename string, function string)
+}
 
-var speechBuffer strings.Builder
-var fileSet *token.FileSet
+type goSpeaker struct {
+	quiet           bool
+	skipImports     bool
+	targetFunction  string
+	audioOutputFile string
+	verboseOutput   bool
 
-func SpeakGoFile(filename string) {
+	speechBuffer strings.Builder
+	fileSet      *token.FileSet
+}
+
+func MakeGoSpeakerDefault() GoSpeaker {
+	return &goSpeaker{}
+}
+
+func MakeGoSpeaker(quiet bool, verbose bool, skipImports bool, audioOutputFile string) GoSpeaker {
+	return &goSpeaker{
+		quiet:           quiet,
+		verboseOutput:   verbose,
+		skipImports:     skipImports,
+		audioOutputFile: audioOutputFile,
+	}
+}
+
+func (gsp *goSpeaker) SpeakGoFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		speak("I can't find the file named " + speakableFilename(filename))
+		gsp.speak("I can't find the file named " + speakableFilename(filename))
 		fmt.Printf("File %s does not exist\n", filename)
 		return
 	}
 
-	fileSet = token.NewFileSet() // positions are relative to fset
+	gsp.fileSet = token.NewFileSet() // positions are relative to fset
 
-	f, err := parser.ParseFile(fileSet, filename, nil, parser.ParseComments)
+	f, err := parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
 	if err != nil && f == nil {
 		panic(err)
 	}
@@ -40,23 +60,52 @@ func SpeakGoFile(filename string) {
 		fmt.Printf("Warning: file had compile errors: %+v", err)
 	}
 
-	if TargetFunction == "" {
-		speak("package " + f.Name.String())
+	gsp.speakFile(f)
+
+	gsp.speakBuffer()
+}
+
+func (gsp *goSpeaker) SpeakGoFunction(filename string, function string) {
+	gsp.targetFunction = function
+
+	if _, err := os.Stat(filename); os.IsNotExist(err) {
+		gsp.speak("I can't find the file named " + speakableFilename(filename))
+		fmt.Printf("File %s does not exist\n", filename)
+		return
 	}
 
-	if TargetFunction == "" && !SkipImports {
-		speakImportSpecs(f.Imports)
+	gsp.fileSet = token.NewFileSet() // positions are relative to fset
+
+	f, err := parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
+	if err != nil && f == nil {
+		panic(err)
+	}
+	if err != nil {
+		fmt.Printf("Warning: file had compile errors: %+v", err)
 	}
 
-	if TargetFunction == "" {
-		speak("declarations")
+	gsp.speakFile(f)
+
+	gsp.speakBuffer()
+}
+
+func (gsp *goSpeaker) speakFile(file *ast.File) {
+
+	if gsp.targetFunction == "" {
+		gsp.speak("package " + file.Name.String())
 	}
 
-	for _, d := range f.Decls {
-		speakDeclaration(d)
+	if gsp.targetFunction == "" && !gsp.skipImports {
+		gsp.speakImportSpecs(file.Imports)
 	}
 
-	speakBuffer()
+	if gsp.targetFunction == "" {
+		gsp.speak("declarations")
+	}
+
+	for _, d := range file.Decls {
+		gsp.speakDeclaration(d)
+	}
 }
 
 func speakableFilename(filename string) string {
@@ -66,9 +115,9 @@ func speakableFilename(filename string) string {
 	return filename
 }
 
-func getFileString(from, to token.Pos) string {
-	fromPosition := fileSet.Position(from)
-	toPosition := fileSet.Position(to)
+func (gsp *goSpeaker) getFileString(from, to token.Pos) string {
+	fromPosition := gsp.fileSet.Position(from)
+	toPosition := gsp.fileSet.Position(to)
 
 	bytesToRead := toPosition.Offset - fromPosition.Offset + 1
 	if bytesToRead < 0 {
@@ -151,27 +200,27 @@ func splitSymbol(symbol string) []string {
 	return symbols
 }
 
-func speakSymbol(symbol string) {
-	speak(symbolToSpeech(symbol))
+func (gsp *goSpeaker) speakSymbol(symbol string) {
+	gsp.speak(symbolToSpeech(symbol))
 }
 
-func speakString(s string) {
+func (gsp *goSpeaker) speakString(s string) {
 	if strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
 		s = s[1 : len(s)-1]
 		s = strings.Replace(s, "\\", " backslash ", -1)
 		if len(s) == 0 {
-			speak("empty string")
+			gsp.speak("empty string")
 		} else if len(strings.TrimSpace(s)) == 0 {
 			if len(s) == 1 {
-				speak("string with one blank")
+				gsp.speak("string with one blank")
 			} else {
-				speak(fmt.Sprintf("string of %d blanks", len(s)))
+				gsp.speak(fmt.Sprintf("string of %d blanks", len(s)))
 			}
 		} else {
-			speak(s)
+			gsp.speak(s)
 		}
 	} else {
-		speak(s)
+		gsp.speak(s)
 	}
 }
 
@@ -187,31 +236,31 @@ func translateSymbols(symbols []string) []string {
 	return newSyms
 }
 
-func speak(speech string) {
-	if VerboseOutput {
+func (gsp *goSpeaker) speak(speech string) {
+	if gsp.verboseOutput {
 		fmt.Printf("Saying: %s\n", speech)
 	}
-	if ShutUp {
+	if gsp.quiet {
 		return
 	}
-	speechBuffer.WriteString(speech)
-	speechBuffer.WriteString("[[slnc 200]]\n")
+	gsp.speechBuffer.WriteString(speech)
+	gsp.speechBuffer.WriteString("[[slnc 200]]\n")
 }
 
-func speakBuffer() {
+func (gsp *goSpeaker) speakBuffer() {
 	tempFile, err := ioutil.TempFile(".", "gospeech")
 	if err != nil {
 		fmt.Printf("Unable to create temp file: %+v\n", err)
 		return
 	}
-	tempFile.WriteString(speechBuffer.String())
+	tempFile.WriteString(gsp.speechBuffer.String())
 	tempFile.Close()
 	defer os.Remove(tempFile.Name())
 	var cmd *exec.Cmd
-	if SayOut == "" {
+	if gsp.audioOutputFile == "" {
 		cmd = exec.Command("/usr/bin/say", "-f", tempFile.Name())
 	} else {
-		cmd = exec.Command("/usr/bin/say", "-f", tempFile.Name(), "-o", SayOut)
+		cmd = exec.Command("/usr/bin/say", "-f", tempFile.Name(), "-o", gsp.audioOutputFile)
 	}
 
 	err = cmd.Run()
@@ -221,298 +270,298 @@ func speakBuffer() {
 	}
 }
 
-func speakImportSpecs(imports []*ast.ImportSpec) {
-	speak("imports")
+func (gsp *goSpeaker) speakImportSpecs(imports []*ast.ImportSpec) {
+	gsp.speak("imports")
 
 	for _, imp := range imports {
 		symSpeech := symbolToSpeech(imp.Path.Value)
 		if imp.Name != nil {
 			symSpeech = symSpeech + " as " + symbolToSpeech(imp.Name.String())
 		}
-		speak(symSpeech)
+		gsp.speak(symSpeech)
 	}
 }
 
-func speakValueSpec(vs *ast.ValueSpec, specType string) {
+func (gsp *goSpeaker) speakValueSpec(vs *ast.ValueSpec, specType string) {
 	if vs.Names != nil && len(vs.Names) > 1 {
 		specType = specType + "s"
 	}
-	speak(specType)
+	gsp.speak(specType)
 	for i := range vs.Names {
-		speakSymbol(vs.Names[i].String())
-		speak("of type ")
-		speakExpr(vs.Type)
+		gsp.speakSymbol(vs.Names[i].String())
+		gsp.speak("of type ")
+		gsp.speakExpr(vs.Type)
 		if vs.Values != nil && vs.Values[i] != nil {
-			speak("equals")
-			speakExpr(vs.Values[i])
+			gsp.speak("equals")
+			gsp.speakExpr(vs.Values[i])
 		}
 	}
 }
 
-func speakTypeSpec(ts *ast.TypeSpec) {
-	speak("type")
-	speakSymbol(ts.Name.String())
-	speak("is")
-	speakExpr(ts.Type)
+func (gsp *goSpeaker) speakTypeSpec(ts *ast.TypeSpec) {
+	gsp.speak("type")
+	gsp.speakSymbol(ts.Name.String())
+	gsp.speak("is")
+	gsp.speakExpr(ts.Type)
 }
 
-func speakDeclaration(d ast.Decl) {
+func (gsp *goSpeaker) speakDeclaration(d ast.Decl) {
 	switch v := d.(type) {
 	case *ast.FuncDecl:
-		if TargetFunction != "" && TargetFunction != v.Name.String() {
+		if gsp.targetFunction != "" && gsp.targetFunction != v.Name.String() {
 			return
 		}
-		speak("function " + symbolToSpeech(v.Name.String()))
-		if VerboseOutput {
+		gsp.speak("function " + symbolToSpeech(v.Name.String()))
+		if gsp.verboseOutput {
 			fmt.Printf("function name: %s\n", v.Name.String())
 		}
-		speakFieldList(v.Type.Params, "taking ", "parameter")
-		speakFieldList(v.Type.Results, "and returning ", "value")
-		speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))
+		gsp.speakFieldList(v.Type.Params, "taking ", "parameter")
+		gsp.speakFieldList(v.Type.Results, "and returning ", "value")
+		gsp.speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))
 	case *ast.GenDecl:
-		if TargetFunction != "" {
+		if gsp.targetFunction != "" {
 			return
 		}
 		switch v.Tok {
 		case token.CONST:
 			for _, c := range v.Specs {
-				speakValueSpec(c.(*ast.ValueSpec), "constant")
+				gsp.speakValueSpec(c.(*ast.ValueSpec), "constant")
 			}
 		case token.VAR:
 			for _, v := range v.Specs {
-				speakValueSpec(v.(*ast.ValueSpec), "var")
+				gsp.speakValueSpec(v.(*ast.ValueSpec), "var")
 			}
 		case token.TYPE:
 			for _, t := range v.Specs {
-				speakTypeSpec(t.(*ast.TypeSpec))
+				gsp.speakTypeSpec(t.(*ast.TypeSpec))
 			}
 		}
 	case *ast.BadDecl:
-		badDeclText := getFileString(v.From, v.To)
-		speak("Bad declaration")
-		speakSymbol(badDeclText)
+		badDeclText := gsp.getFileString(v.From, v.To)
+		gsp.speak("Bad declaration")
+		gsp.speakSymbol(badDeclText)
 	}
 }
 
-func speakFieldList(fields *ast.FieldList, takeOrRec string, fieldType string) {
+func (gsp *goSpeaker) speakFieldList(fields *ast.FieldList, takeOrRec string, fieldType string) {
 	if fields == nil {
-		speak(takeOrRec + " no " + fieldType + "s")
+		gsp.speak(takeOrRec + " no " + fieldType + "s")
 		return
 	}
 	if fields.NumFields() == 0 {
-		speak(takeOrRec + " no " + fieldType + "s")
+		gsp.speak(takeOrRec + " no " + fieldType + "s")
 	} else if fields.NumFields() == 1 {
-		speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType)
+		gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType)
 	} else {
-		speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType + "s")
+		gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType + "s")
 	}
 	if fields.List != nil {
 		for _, field := range fields.List {
-			speakField(field)
+			gsp.speakField(field)
 		}
 	}
 }
 
-func speakField(field *ast.Field) {
+func (gsp *goSpeaker) speakField(field *ast.Field) {
 	as := "as "
 	if len(field.Names) > 1 {
 		as = "all as"
 	}
 	for _, fn := range field.Names {
-		speak(symbolToSpeech(fn.String()))
+		gsp.speak(symbolToSpeech(fn.String()))
 	}
-	speak(as)
-	speakExpr(field.Type)
+	gsp.speak(as)
+	gsp.speakExpr(field.Type)
 	if field.Tag != nil {
-		speak("with tag")
-		speakExpr(field.Tag)
+		gsp.speak("with tag")
+		gsp.speakExpr(field.Tag)
 	}
 }
 
-func speakExpr(expr ast.Expr) {
+func (gsp *goSpeaker) speakExpr(expr ast.Expr) {
 	if expr == nil {
 		return
 	}
 	switch v := expr.(type) {
 	case *ast.Ident:
-		speak(symbolToSpeech(v.String()))
+		gsp.speak(symbolToSpeech(v.String()))
 	case *ast.ArrayType:
 		if v.Len == nil {
-			speak("slice of")
+			gsp.speak("slice of")
 		} else {
-			speakExpr(v.Len)
-			speak("element")
-			speak("array of")
+			gsp.speakExpr(v.Len)
+			gsp.speak("element")
+			gsp.speak("array of")
 		}
-		speakExpr(v.Elt)
+		gsp.speakExpr(v.Elt)
 	case *ast.StarExpr:
-		speak("pointer to")
-		speakExpr(v.X)
+		gsp.speak("pointer to")
+		gsp.speakExpr(v.X)
 	case *ast.MapType:
-		speak("map with ")
-		speakExpr(v.Key)
-		speak("key and ")
-		speakExpr(v.Value)
-		speak("value")
+		gsp.speak("map with ")
+		gsp.speakExpr(v.Key)
+		gsp.speak("key and ")
+		gsp.speakExpr(v.Value)
+		gsp.speak("value")
 	case *ast.SelectorExpr:
-		speakExpr(v.X)
-		speak("dot")
-		speakExpr(v.Sel)
+		gsp.speakExpr(v.X)
+		gsp.speak("dot")
+		gsp.speakExpr(v.Sel)
 	case *ast.BinaryExpr:
-		speakExpr(v.X)
-		speakBinaryOp(v.Op.String())
-		speakExpr(v.Y)
+		gsp.speakExpr(v.X)
+		gsp.speakBinaryOp(v.Op.String())
+		gsp.speakExpr(v.Y)
 	case *ast.ParenExpr:
-		speak("left paren")
-		speakExpr(v.X)
-		speak("right paren")
+		gsp.speak("left paren")
+		gsp.speakExpr(v.X)
+		gsp.speak("right paren")
 	case *ast.CallExpr:
-		speakFunctionCall(v)
+		gsp.speakFunctionCall(v)
 	case *ast.UnaryExpr:
 		if v.Op.IsOperator() {
-			speakUnaryOp(v.Op.String())
+			gsp.speakUnaryOp(v.Op.String())
 		}
-		speakExpr(v.X)
+		gsp.speakExpr(v.X)
 	case *ast.BasicLit:
-		speakString(v.Value)
+		gsp.speakString(v.Value)
 	case *ast.SliceExpr:
-		speak("slice")
-		speakExpr(v.X)
-		speak("from")
+		gsp.speak("slice")
+		gsp.speakExpr(v.X)
+		gsp.speak("from")
 		if v.Low != nil {
-			speakExpr(v.Low)
+			gsp.speakExpr(v.Low)
 		} else {
-			speak("start")
+			gsp.speak("start")
 		}
-		speak("to")
+		gsp.speak("to")
 		if v.High != nil {
-			speakExpr(v.High)
+			gsp.speakExpr(v.High)
 		} else {
-			speak("end")
+			gsp.speak("end")
 		}
 		if v.Slice3 {
-			speak("with cap ")
-			speakExpr(v.Max)
+			gsp.speak("with cap ")
+			gsp.speakExpr(v.Max)
 		}
 	case *ast.CompositeLit:
-		speakCompositeLit(v)
+		gsp.speakCompositeLit(v)
 
 	case *ast.KeyValueExpr:
-		speakExpr(v.Key)
-		speak("colon	")
-		speakExpr(v.Value)
+		gsp.speakExpr(v.Key)
+		gsp.speak("colon	")
+		gsp.speakExpr(v.Value)
 
 	case *ast.FuncLit:
-		speak("lambda")
-		speakFieldList(v.Type.Params, "taking", "parameter")
-		speakFieldList(v.Type.Results, "and returning", "value")
-		speakBlockStmt(v.Body, "is", "end lambda")
+		gsp.speak("lambda")
+		gsp.speakFieldList(v.Type.Params, "taking", "parameter")
+		gsp.speakFieldList(v.Type.Results, "and returning", "value")
+		gsp.speakBlockStmt(v.Body, "is", "end lambda")
 
 	case *ast.IndexExpr:
-		speakExpr(v.X)
-		speak("sub")
-		speakExpr(v.Index)
+		gsp.speakExpr(v.X)
+		gsp.speak("sub")
+		gsp.speakExpr(v.Index)
 
 	case *ast.InterfaceType:
-		speakInterfaceType(v)
+		gsp.speakInterfaceType(v)
 
 	case *ast.StructType:
-		speakStructType(v)
+		gsp.speakStructType(v)
 
 	case *ast.TypeAssertExpr:
-		speakExpr(v.X)
-		speak("as type")
-		speakExpr(v.Type)
+		gsp.speakExpr(v.X)
+		gsp.speak("as type")
+		gsp.speakExpr(v.Type)
 
 	case *ast.ChanType:
 		if v.Dir == ast.SEND {
-			speak("send to channel")
-			speakExpr(v.Value)
+			gsp.speak("send to channel")
+			gsp.speakExpr(v.Value)
 		} else {
-			speak("received from channel")
-			speakExpr(v.Value)
+			gsp.speak("received from channel")
+			gsp.speakExpr(v.Value)
 		}
 
 	case *ast.Ellipsis:
 		if v.Elt != nil {
-			speak("variable number of")
-			speakExpr(v.Elt)
+			gsp.speak("variable number of")
+			gsp.speakExpr(v.Elt)
 		} else {
-			speak("variable number")
+			gsp.speak("variable number")
 		}
 
 	case *ast.FuncType:
-		speak("function")
-		speakFieldList(v.Params, "taking ", "parameter")
-		speakFieldList(v.Results, "and returning ", "value")
+		gsp.speak("function")
+		gsp.speakFieldList(v.Params, "taking ", "parameter")
+		gsp.speakFieldList(v.Results, "and returning ", "value")
 
 	case *ast.BadExpr:
-		badDeclText := getFileString(v.From, v.To)
-		speak("Bad expression")
-		speakSymbol(badDeclText)
+		badDeclText := gsp.getFileString(v.From, v.To)
+		gsp.speak("Bad expression")
+		gsp.speakSymbol(badDeclText)
 	}
 }
 
-func speakCompositeLit(c *ast.CompositeLit) {
+func (gsp *goSpeaker) speakCompositeLit(c *ast.CompositeLit) {
 	if len(c.Elts) == 0 {
-		speak("empty")
+		gsp.speak("empty")
 	}
 	if c.Type != nil {
-		speakExpr(c.Type)
+		gsp.speakExpr(c.Type)
 	}
 	if len(c.Elts) > 0 {
-		speak("containing")
+		gsp.speak("containing")
 	}
 	first := true
 	for _, e := range c.Elts {
 		if !first {
-			speak("comma")
+			gsp.speak("comma")
 		} else {
 			first = false
 		}
-		speakExpr(e)
+		gsp.speakExpr(e)
 	}
 }
 
-func speakInterfaceType(iface *ast.InterfaceType) {
+func (gsp *goSpeaker) speakInterfaceType(iface *ast.InterfaceType) {
 	if iface.Methods == nil || iface.Methods.List == nil || len(iface.Methods.List) == 0 {
-		speak("empty interface")
+		gsp.speak("empty interface")
 	} else {
-		speak("interface")
-		speakFieldList(iface.Methods, "having", "method")
+		gsp.speak("interface")
+		gsp.speakFieldList(iface.Methods, "having", "method")
 	}
 }
 
-func speakStructType(s *ast.StructType) {
+func (gsp *goSpeaker) speakStructType(s *ast.StructType) {
 	if s.Fields == nil || s.Fields.List == nil || len(s.Fields.List) == 0 {
-		speak("empty struct")
+		gsp.speak("empty struct")
 	} else {
-		speak("struct")
-		speakFieldList(s.Fields, "having", "field")
+		gsp.speak("struct")
+		gsp.speakFieldList(s.Fields, "having", "field")
 	}
 }
 
-func speakFunctionCall(c *ast.CallExpr) {
+func (gsp *goSpeaker) speakFunctionCall(c *ast.CallExpr) {
 	if len(c.Args) == 0 {
-		speak("call")
+		gsp.speak("call")
 	}
-	speakExpr(c.Fun)
+	gsp.speakExpr(c.Fun)
 	if len(c.Args) > 0 {
-		speak("of")
+		gsp.speak("of")
 	}
 	spokeEllipsis := false
 	first := true
 	for _, a := range c.Args {
 		if !first {
-			speak("comma	")
+			gsp.speak("comma	")
 		} else {
 			first = false
 		}
 		if c.Ellipsis != token.NoPos && c.Ellipsis < a.Pos() && !spokeEllipsis {
-			speak("ellipsis")
+			gsp.speak("ellipsis")
 			spokeEllipsis = true
 		}
-		speakExpr(a)
+		gsp.speakExpr(a)
 	}
 }
 
@@ -538,10 +587,10 @@ var binaryOpSpeech = map[string]string{
 	"&^": "bitwise and not",
 }
 
-func speakBinaryOp(op string) {
+func (gsp *goSpeaker) speakBinaryOp(op string) {
 	speechVal, ok := binaryOpSpeech[op]
 	if ok {
-		speak(speechVal)
+		gsp.speak(speechVal)
 	}
 }
 
@@ -555,264 +604,265 @@ var unaryOpSpeech = map[string]string{
 	"<-": "receive from channel",
 }
 
-func speakUnaryOp(op string) {
+func (gsp *goSpeaker) speakUnaryOp(op string) {
 	speechVal, ok := unaryOpSpeech[op]
 	if ok {
-		speak(speechVal)
+		gsp.speak(speechVal)
 	}
 }
 
-func speakBlockStmt(stmts *ast.BlockStmt, bodyStart string, bodyEnd string) {
-	speak(bodyStart)
+func (gsp *goSpeaker) speakBlockStmt(stmts *ast.BlockStmt, bodyStart string, bodyEnd string) {
+	gsp.speak(bodyStart)
 	for _, bs := range stmts.List {
-		speakStmt(bs)
+		gsp.speakStmt(bs)
 	}
-	speak(bodyEnd)
+	gsp.speak(bodyEnd)
 }
 
-func speakStmt(stmt ast.Stmt) {
+func (gsp *goSpeaker) speakStmt(stmt ast.Stmt) {
 	switch v := stmt.(type) {
 	case *ast.BlockStmt:
-		speak("begin block")
+		gsp.speak("begin block")
 		for _, bs := range v.List {
-			speakStmt(bs)
+			gsp.speakStmt(bs)
 		}
-		speak("end block")
+		gsp.speak("end block")
 	case *ast.IfStmt:
-		speakIfStatement(v)
+		gsp.speakIfStatement(v)
 	case *ast.ForStmt:
-		speakForLoop(v)
+		gsp.speakForLoop(v)
 	case *ast.RangeStmt:
-		speak("range over ")
-		speakExpr(v.X)
-		speak("with")
+		gsp.speak("range over ")
+		gsp.speakExpr(v.X)
+		gsp.speak("with")
 		if v.Key != nil {
-			speak("key")
-			speakExpr(v.Key)
+			gsp.speak("key")
+			gsp.speakExpr(v.Key)
 			if v.Value != nil {
-				speak("and")
+				gsp.speak("and")
 			}
 		}
 		if v.Value != nil {
-			speak("value")
-			speakExpr(v.Value)
+			gsp.speak("value")
+			gsp.speakExpr(v.Value)
 		}
 		if v.Body != nil {
-			speakBlockStmt(v.Body, "range body", "end range")
+			gsp.speakBlockStmt(v.Body, "range body", "end range")
 		}
 	case *ast.ReturnStmt:
-		speak("return")
+		gsp.speak("return")
 		first := true
 		for _, e := range v.Results {
 			if !first {
-				speak("also")
+				gsp.speak("also")
 			} else {
 				first = false
 			}
-			speakExpr(e)
+			gsp.speakExpr(e)
 		}
 	case *ast.AssignStmt:
-		speakAssignStatement(v)
+		gsp.speakAssignStatement(v)
 
 	case *ast.ExprStmt:
-		speakExpr(v.X)
+		gsp.speakExpr(v.X)
 
 	case *ast.BranchStmt:
-		speak(v.Tok.String())
+		gsp.speak(v.Tok.String())
 		if v.Label != nil {
-			speak("at")
-			speakSymbol(v.Label.String())
+			gsp.speak("at")
+			gsp.speakSymbol(v.Label.String())
 		}
 	case *ast.SwitchStmt:
-		speakSwitchStatement(v)
+		gsp.speakSwitchStatement(v)
 
 	case *ast.TypeSwitchStmt:
-		speakTypeSwitchStatement(v)
+		gsp.speakTypeSwitchStatement(v)
 
 	case *ast.CommClause:
-		speakCommClause(v)
+		gsp.speakCommClause(v)
 
 	case *ast.CaseClause:
-		speakSwitchCase(v)
+		gsp.speakSwitchCase(v)
 
 	case *ast.DeferStmt:
-		speak("defer")
-		speakExpr(v.Call)
+		gsp.speak("defer")
+		gsp.speakExpr(v.Call)
 
 	case *ast.GoStmt:
-		speak("go")
-		speakExpr(v.Call)
+		gsp.speak("go")
+		gsp.speakExpr(v.Call)
 
 	case *ast.EmptyStmt:
-		speak("empty")
+		gsp.speak("empty")
 
 	case *ast.IncDecStmt:
 		if v.Tok == token.INC {
-			speak("increment")
+			gsp.speak("increment")
 		} else {
-			speak("decrement")
+			gsp.speak("decrement")
 		}
-		speakExpr(v.X)
+		gsp.speakExpr(v.X)
 
 	case *ast.LabeledStmt:
-		speak("label")
-		speakSymbol(v.Label.String())
-		speakStmt(v.Stmt)
+		gsp.speak("label")
+		gsp.speakSymbol(v.Label.String())
+		gsp.speakStmt(v.Stmt)
 
 	case *ast.SelectStmt:
-		speakSelectStatement(v)
+		gsp.speakSelectStatement(v)
 
 	case *ast.SendStmt:
-		speak("send")
-		speakExpr(v.Value)
-		speak("to channel")
-		speakExpr(v.Chan)
+		gsp.speak("send")
+		gsp.speakExpr(v.Value)
+		gsp.speak("to channel")
+		gsp.speakExpr(v.Chan)
 
 	case *ast.BadStmt:
-		badDeclText := getFileString(v.From, v.To)
-		speak("Bad statement")
-		speakSymbol(badDeclText)
+		badDeclText := gsp.getFileString(v.From, v.To)
+		gsp.speak("Bad statement")
+		gsp.speakSymbol(badDeclText)
 
 	case *ast.DeclStmt:
-		speakDeclaration(v.Decl)
+		gsp.speakDeclaration(v.Decl)
 	}
 }
 
-func speakAssignStatement(s *ast.AssignStmt) {
-	speak("let")
+func (gsp *goSpeaker) speakAssignStatement(s *ast.AssignStmt) {
+	gsp.speak("let")
 	if len(s.Lhs) > 1 && len(s.Lhs) == len(s.Rhs) {
 		for i := range s.Lhs {
-			speakExpr(s.Lhs[i])
-			speak("equal")
-			speakExpr(s.Rhs[i])
+			gsp.speakExpr(s.Lhs[i])
+			gsp.speak("equal")
+			gsp.speakExpr(s.Rhs[i])
 		}
 	} else {
 		first := true
 		for _, l := range s.Lhs {
 			if !first {
-				speak("and")
+				gsp.speak("and")
 			} else {
 				first = false
 			}
-			speakExpr(l)
+			gsp.speakExpr(l)
 		}
-		speak("equal")
+		gsp.speak("equal")
 		for _, r := range s.Rhs {
-			speakExpr(r)
+			gsp.speakExpr(r)
 		}
 	}
 }
-func speakIfStatement(s *ast.IfStmt) {
-	speak("if")
+
+func (gsp *goSpeaker) speakIfStatement(s *ast.IfStmt) {
+	gsp.speak("if")
 	if s.Init != nil {
-		speak("with initializer ")
-		speakStmt(s.Init)
-		speak("when")
+		gsp.speak("with initializer ")
+		gsp.speakStmt(s.Init)
+		gsp.speak("when")
 	}
 	if s.Cond != nil {
-		speakExpr(s.Cond)
+		gsp.speakExpr(s.Cond)
 	}
 	if s.Body != nil {
 		bodyEnd := "end if"
 		if s.Else != nil {
 			bodyEnd = ""
 		}
-		speakBlockStmt(s.Body, "then", bodyEnd)
+		gsp.speakBlockStmt(s.Body, "then", bodyEnd)
 	}
 	if s.Else != nil {
 		switch e := s.Else.(type) {
 		case *ast.BlockStmt:
-			speakBlockStmt(e, "else", "end if")
+			gsp.speakBlockStmt(e, "else", "end if")
 		default:
-			speakStmt(e)
+			gsp.speakStmt(e)
 		}
 	}
 }
-func speakForLoop(fl *ast.ForStmt) {
+func (gsp *goSpeaker) speakForLoop(fl *ast.ForStmt) {
 	loopType := "for"
 	if fl.Init == nil && fl.Post == nil {
 		if fl.Cond == nil {
-			speak("for ever")
+			gsp.speak("for ever")
 		} else {
-			speak("while")
+			gsp.speak("while")
 			loopType = "while"
-			speakExpr(fl.Cond)
+			gsp.speakExpr(fl.Cond)
 		}
 	} else {
-		speak("for")
+		gsp.speak("for")
 		if fl.Init == nil {
-			speakStmt(fl.Init)
+			gsp.speakStmt(fl.Init)
 		}
 		if fl.Cond != nil {
-			speak("while")
-			speakExpr(fl.Cond)
+			gsp.speak("while")
+			gsp.speakExpr(fl.Cond)
 		}
 		if fl.Post != nil {
-			speakStmt(fl.Post)
+			gsp.speakStmt(fl.Post)
 		}
 	}
-	speakBlockStmt(fl.Body, "do", "end "+loopType+" loop")
+	gsp.speakBlockStmt(fl.Body, "do", "end "+loopType+" loop")
 }
 
-func speakSwitchStatement(s *ast.SwitchStmt) {
-	speak("switch")
+func (gsp *goSpeaker) speakSwitchStatement(s *ast.SwitchStmt) {
+	gsp.speak("switch")
 	if s.Init != nil {
-		speak("with initializer")
-		speakStmt(s.Init)
+		gsp.speak("with initializer")
+		gsp.speakStmt(s.Init)
 	}
-	speak("on")
-	speakExpr(s.Tag)
-	speakBlockStmt(s.Body, "", "end switch")
+	gsp.speak("on")
+	gsp.speakExpr(s.Tag)
+	gsp.speakBlockStmt(s.Body, "", "end switch")
 
 }
 
-func speakTypeSwitchStatement(s *ast.TypeSwitchStmt) {
-	speak("switch")
+func (gsp *goSpeaker) speakTypeSwitchStatement(s *ast.TypeSwitchStmt) {
+	gsp.speak("switch")
 	if s.Init != nil {
-		speak("with initializer")
-		speakStmt(s.Init)
+		gsp.speak("with initializer")
+		gsp.speakStmt(s.Init)
 	}
 
-	speak("on type")
-	speakStmt(s.Assign)
-	speakBlockStmt(s.Body, "", "end type switch")
+	gsp.speak("on type")
+	gsp.speakStmt(s.Assign)
+	gsp.speakBlockStmt(s.Body, "", "end type switch")
 
 }
 
-func speakCommClause(c *ast.CommClause) {
+func (gsp *goSpeaker) speakCommClause(c *ast.CommClause) {
 	if c.Comm != nil {
-		speak("default")
+		gsp.speak("default")
 	} else {
-		speak("case")
+		gsp.speak("case")
 	}
-	speakStmt(c.Comm)
+	gsp.speakStmt(c.Comm)
 	for _, cs := range c.Body {
-		speakStmt(cs)
+		gsp.speakStmt(cs)
 	}
 }
 
-func speakSwitchCase(c *ast.CaseClause) {
+func (gsp *goSpeaker) speakSwitchCase(c *ast.CaseClause) {
 	if len(c.List) == 0 {
-		speak("default")
+		gsp.speak("default")
 	} else {
-		speak("case")
+		gsp.speak("case")
 	}
 	first := true
 	for _, e := range c.List {
 		if !first {
-			speak("or")
+			gsp.speak("or")
 		} else {
 			first = false
 		}
-		speakExpr(e)
+		gsp.speakExpr(e)
 	}
 	for _, cs := range c.Body {
-		speakStmt(cs)
+		gsp.speakStmt(cs)
 	}
 }
 
-func speakSelectStatement(s *ast.SelectStmt) {
-	speak("select")
-	speakBlockStmt(s.Body, "", "end select")
+func (gsp *goSpeaker) speakSelectStatement(s *ast.SelectStmt) {
+	gsp.speak("select")
+	gsp.speakBlockStmt(s.Body, "", "end select")
 
 }

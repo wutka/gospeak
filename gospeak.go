@@ -21,6 +21,7 @@ var SayOut string
 var VerboseOutput bool
 
 var speechBuffer strings.Builder
+var fileSet *token.FileSet
 
 func SpeakGoFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
@@ -29,11 +30,14 @@ func SpeakGoFile(filename string) {
 		return
 	}
 
-	fileSet := token.NewFileSet() // positions are relative to fset
+	fileSet = token.NewFileSet() // positions are relative to fset
 
 	f, err := parser.ParseFile(fileSet, filename, nil, parser.ParseComments)
-	if err != nil {
+	if err != nil && f == nil {
 		panic(err)
+	}
+	if err != nil {
+		fmt.Printf("Warning: file had compile errors: %+v", err)
 	}
 
 	if TargetFunction == "" {
@@ -60,6 +64,42 @@ func speakableFilename(filename string) string {
 		filename = filename[:len(filename)-3] + " dot go"
 	}
 	return filename
+}
+
+func getFileString(from, to token.Pos) string {
+	fromPosition := fileSet.Position(from)
+	toPosition := fileSet.Position(to)
+
+	bytesToRead := toPosition.Offset - fromPosition.Offset + 1
+	if bytesToRead < 0 {
+		fmt.Printf("From: %d  To: %d  Negative number of bytes\n",
+			fromPosition.Offset, toPosition.Offset)
+		return ""
+	} else if bytesToRead == 0 {
+		return ""
+	}
+
+	f, err := os.Open(fromPosition.Filename)
+	if err != nil {
+		fmt.Printf("Unable to open %s: %+v", fromPosition.Filename, err)
+		return ""
+	}
+	defer f.Close()
+
+	_, err = f.Seek(int64(fromPosition.Offset), 0)
+	if err != nil {
+		fmt.Printf("Error seeking in %s: %+v", fromPosition.Filename, err)
+		return ""
+	}
+
+	buff := make([]byte, bytesToRead)
+	n, err := f.Read(buff)
+	if err != nil {
+		fmt.Printf("Error reading from %s: %+v", fromPosition.Filename, err)
+		return ""
+	}
+
+	return string(buff[:n])
 }
 
 var symbolTranslations = map[string]string{
@@ -148,11 +188,11 @@ func translateSymbols(symbols []string) []string {
 }
 
 func speak(speech string) {
-	if ShutUp {
-		return
-	}
 	if VerboseOutput {
 		fmt.Printf("Saying: %s\n", speech)
+	}
+	if ShutUp {
+		return
 	}
 	speechBuffer.WriteString(speech)
 	speechBuffer.WriteString("[[slnc 200]]\n")
@@ -166,6 +206,7 @@ func speakBuffer() {
 	}
 	tempFile.WriteString(speechBuffer.String())
 	tempFile.Close()
+	defer os.Remove(tempFile.Name())
 	var cmd *exec.Cmd
 	if SayOut == "" {
 		cmd = exec.Command("/usr/bin/say", "-f", tempFile.Name())
@@ -178,7 +219,6 @@ func speakBuffer() {
 		fmt.Printf("Unable to run say: %+v\n", err)
 		return
 	}
-	_ = os.Remove(tempFile.Name())
 }
 
 func speakImportSpecs(imports []*ast.ImportSpec) {
@@ -247,6 +287,10 @@ func speakDeclaration(d ast.Decl) {
 				speakTypeSpec(t.(*ast.TypeSpec))
 			}
 		}
+	case *ast.BadDecl:
+		badDeclText := getFileString(v.From, v.To)
+		speak("Bad declaration")
+		speakSymbol(badDeclText)
 	}
 }
 
@@ -293,10 +337,11 @@ func speakExpr(expr ast.Expr) {
 	case *ast.Ident:
 		speak(symbolToSpeech(v.String()))
 	case *ast.ArrayType:
-		speakArraySize(v.Len)
 		if v.Len == nil {
 			speak("slice of")
 		} else {
+			speakExpr(v.Len)
+			speak("element")
 			speak("array of")
 		}
 		speakExpr(v.Elt)
@@ -378,6 +423,33 @@ func speakExpr(expr ast.Expr) {
 		speakExpr(v.X)
 		speak("as type")
 		speakExpr(v.Type)
+
+	case *ast.ChanType:
+		if v.Dir == ast.SEND {
+			speak("send to channel")
+			speakExpr(v.Value)
+		} else {
+			speak("received from channel")
+			speakExpr(v.Value)
+		}
+
+	case *ast.Ellipsis:
+		if v.Elt != nil {
+			speak("variable number of")
+			speakExpr(v.Elt)
+		} else {
+			speak("variable number")
+		}
+
+	case *ast.FuncType:
+		speak("function")
+		speakFieldList(v.Params, "taking ", "parameter")
+		speakFieldList(v.Results, "and returning ", "value")
+
+	case *ast.BadExpr:
+		badDeclText := getFileString(v.From, v.To)
+		speak("Bad expression")
+		speakSymbol(badDeclText)
 	}
 }
 
@@ -403,13 +475,21 @@ func speakCompositeLit(c *ast.CompositeLit) {
 }
 
 func speakInterfaceType(iface *ast.InterfaceType) {
-	speak("interface")
-	speakFieldList(iface.Methods, "having", "method")
+	if iface.Methods == nil || iface.Methods.List == nil || len(iface.Methods.List) == 0 {
+		speak("empty interface")
+	} else {
+		speak("interface")
+		speakFieldList(iface.Methods, "having", "method")
+	}
 }
 
 func speakStructType(s *ast.StructType) {
-	speak("struct")
-	speakFieldList(s.Fields, "having", "field")
+	if s.Fields == nil || s.Fields.List == nil || len(s.Fields.List) == 0 {
+		speak("empty struct")
+	} else {
+		speak("struct")
+		speakFieldList(s.Fields, "having", "field")
+	}
 }
 
 func speakFunctionCall(c *ast.CallExpr) {
@@ -434,15 +514,6 @@ func speakFunctionCall(c *ast.CallExpr) {
 		}
 		speakExpr(a)
 	}
-}
-
-func speakArraySize(arrSize ast.Expr) {
-	/*
-		switch arrSize.(type) {
-		case ast.Ellipsis:
-			speak("ellipsis")
-		}
-	*/
 }
 
 var binaryOpSpeech = map[string]string{
@@ -596,6 +667,14 @@ func speakStmt(stmt ast.Stmt) {
 		speakExpr(v.Value)
 		speak("to channel")
 		speakExpr(v.Chan)
+
+	case *ast.BadStmt:
+		badDeclText := getFileString(v.From, v.To)
+		speak("Bad statement")
+		speakSymbol(badDeclText)
+
+	case *ast.DeclStmt:
+		speakDeclaration(v.Decl)
 	}
 }
 

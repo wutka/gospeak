@@ -57,7 +57,7 @@ func (gsp *goSpeaker) SpeakGoFile(filename string) {
 		panic(err)
 	}
 	if err != nil {
-		fmt.Printf("Warning: file had compile errors: %+v", err)
+		fmt.Printf("Warning: file had compile errors: %+v\n", err)
 	}
 
 	gsp.speakFile(f)
@@ -91,7 +91,7 @@ func (gsp *goSpeaker) SpeakGoFunction(filename string, function string) {
 
 func (gsp *goSpeaker) speakFile(file *ast.File) {
 
-	if gsp.targetFunction == "" {
+	if gsp.targetFunction == "" && file.Name.String() != "" {
 		gsp.speak("package " + file.Name.String())
 	}
 
@@ -99,7 +99,7 @@ func (gsp *goSpeaker) speakFile(file *ast.File) {
 		gsp.speakImportSpecs(file.Imports)
 	}
 
-	if gsp.targetFunction == "" {
+	if gsp.targetFunction == "" && len(file.Decls) > 0 {
 		gsp.speak("declarations")
 	}
 
@@ -271,6 +271,9 @@ func (gsp *goSpeaker) speakBuffer() {
 }
 
 func (gsp *goSpeaker) speakImportSpecs(imports []*ast.ImportSpec) {
+	if len(imports) == 0 {
+		return
+	}
 	gsp.speak("imports")
 
 	for _, imp := range imports {
@@ -315,6 +318,10 @@ func (gsp *goSpeaker) speakDeclaration(d ast.Decl) {
 		if gsp.verboseOutput {
 			fmt.Printf("function name: %s\n", v.Name.String())
 		}
+		if v.Recv != nil && v.Recv.List != nil && len(v.Recv.List) > 0 {
+			gsp.speakFieldList(v.Recv, "with", "receiver")
+		}
+
 		gsp.speakFieldList(v.Type.Params, "taking ", "parameter")
 		gsp.speakFieldList(v.Type.Results, "and returning ", "value")
 		gsp.speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))

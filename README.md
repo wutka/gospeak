@@ -19,3 +19,11 @@ saygo [options] gofiles
 * *-o anAudioFile.aiff* to save the speech to a file
 
 Otherwise, just specify Go files on the command-line and it will read out each one.
+
+### Update 2018-08-31
+
+I restructured the gospeak API so that it passes data around with the calls to
+facilitate multiple instances. If for some reason you still need the previous API,
+I tagged it as 0.0.1. The saygo command still works the same way.
+
+I also added a SpeakGoString call that makes it easier to write unit tests.

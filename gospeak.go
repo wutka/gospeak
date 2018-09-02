@@ -67,17 +67,23 @@ func MakeGoSpeaker(quiet bool, verbose bool, skipImports bool, audioOutputFile s
 
 func (gsp *goSpeaker) SpeakGoFile(filename string) {
 	gsp.LoadFile(filename)
-	gsp.SpeakAll()
+	if gsp.file != nil {
+		gsp.SpeakAll()
+	}
 }
 
 func (gsp *goSpeaker) SpeakGoFunction(filename string, function string) {
 	gsp.LoadFile(filename)
-	gsp.SpeakFunction(function)
+	if gsp.file != nil {
+		gsp.SpeakFunction(function)
+	}
 }
 
 func (gsp *goSpeaker) SpeakGoString(s string) {
 	gsp.LoadString(s)
-	gsp.SpeakAll()
+	if gsp.file != nil {
+		gsp.SpeakAll()
+	}
 }
 
 func (gsp *goSpeaker) LoadFile(filename string) {
@@ -284,6 +290,7 @@ var symbolTranslations = map[string]string{
 	"\\":      "backslash",
 	"utf":     "you tee f",
 	"ast":     "eigh s t",
+	"a":       "eigh",
 	"strconv": "stir conv",
 	"_":       "none",
 }
@@ -641,7 +648,7 @@ func (gsp *goSpeaker) speakExpr(expr ast.Expr, isDecl bool) {
 		} else {
 			if !v.Slice3 && gsp.isPosInRange(v.Rbrack) {
 				gsp.speak("to end")
-			} else if gsp.isInRange(v.Max) {
+			} else if gsp.isPosInRange(v.Rbrack) {
 				gsp.speak("to end")
 			}
 		}
@@ -1085,6 +1092,9 @@ func (gsp *goSpeaker) speakIfStatement(s *ast.IfStmt) {
 		case *ast.BlockStmt:
 			gsp.speakBlockStmt(e, "else", "end if")
 		default:
+			if e != nil && gsp.isStartInRange(e) {
+				gsp.speak("else")
+			}
 			gsp.speakStmt(e)
 		}
 	}

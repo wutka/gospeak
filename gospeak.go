@@ -164,21 +164,29 @@ func (gsp *goSpeaker) isRanged() bool {
 	return gsp.targetFunction != "" || (gsp.startLine >= 0 && gsp.endLine >= 0)
 }
 
+func (gsp *goSpeaker) isInTargetFunctionContext() bool {
+	if gsp.targetFunction == "" {
+		return true
+	}
+
+	found := false
+	for i := len(gsp.functionStack) - 1; i >= 0; i-- {
+		if gsp.functionStack[i] == gsp.targetFunction {
+			found = true
+		}
+	}
+
+	return found
+}
+
 func (gsp *goSpeaker) isInRange(n ast.Node) bool {
-	if gsp.startLine < 0 || gsp.endLine < 0 {
+	if gsp.targetFunction == "" && (gsp.startLine < 0 || gsp.endLine < 0) {
 		return true
 	}
 
 	if gsp.targetFunction != "" {
-		found := false
-		for i := len(gsp.functionStack); i >= 0; i-- {
-			if gsp.functionStack[i] == gsp.targetFunction {
-				found = true
-			}
-		}
-
-		if !found {
-			return false
+		if gsp.isInTargetFunctionContext() {
+			return true
 		}
 	}
 
@@ -190,8 +198,14 @@ func (gsp *goSpeaker) isInRange(n ast.Node) bool {
 }
 
 func (gsp *goSpeaker) isPosInRange(p token.Pos) bool {
-	if gsp.startLine < 0 || gsp.endLine < 0 {
+	if gsp.targetFunction == "" && (gsp.startLine < 0 || gsp.endLine < 0) {
 		return true
+	}
+
+	if gsp.targetFunction != "" {
+		if gsp.isInTargetFunctionContext() {
+			return true
+		}
 	}
 
 	pos := gsp.fileSet.Position(p)
@@ -200,12 +214,32 @@ func (gsp *goSpeaker) isPosInRange(p token.Pos) bool {
 }
 
 func (gsp *goSpeaker) isStartInRange(n ast.Node) bool {
+	if gsp.targetFunction == "" && (gsp.startLine < 0 || gsp.endLine < 0) {
+		return true
+	}
+
+	if gsp.targetFunction != "" {
+		if gsp.isInTargetFunctionContext() {
+			return true
+		}
+	}
+
 	startPos := gsp.fileSet.Position(n.Pos())
 
 	return startPos.Line >= gsp.startLine && startPos.Line <= gsp.endLine
 }
 
 func (gsp *goSpeaker) isEndInRange(n ast.Node) bool {
+	if gsp.targetFunction == "" && (gsp.startLine < 0 || gsp.endLine < 0) {
+		return true
+	}
+
+	if gsp.targetFunction != "" {
+		if gsp.isInTargetFunctionContext() {
+			return true
+		}
+	}
+
 	endPos := gsp.fileSet.Position(n.End())
 
 	return endPos.Line >= gsp.startLine && endPos.Line <= gsp.endLine
@@ -1173,9 +1207,9 @@ func (gsp *goSpeaker) speakTypeSwitchStatement(s *ast.TypeSwitchStmt) {
 func (gsp *goSpeaker) speakCommClause(c *ast.CommClause) {
 	if gsp.isStartInRange(c) {
 		if c.Comm != nil {
-			gsp.speak("default")
-		} else {
 			gsp.speak("case")
+		} else {
+			gsp.speak("default")
 		}
 	}
 	gsp.speakStmt(c.Comm)

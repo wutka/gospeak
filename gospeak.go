@@ -18,22 +18,40 @@ type GoSpeaker interface {
 	SpeakGoFile(filename string)
 	SpeakGoFunction(filename string, function string)
 	SpeakGoString(s string)
+
+	LoadFile(filename string)
+	LoadString(s string)
+
+	SpeakAll()
+	SpeakFunction(function string)
+	SpeakRange(start, end int)
+
+	SetRange(start, end int)
+	SetTargetFunction(function string)
 }
 
 type goSpeaker struct {
 	quiet           bool
 	skipImports     bool
 	targetFunction  string
+	startLine       int
+	endLine         int
 	audioOutputFile string
 	verboseOutput   bool
 
 	speechBuffer strings.Builder
 	fileSet      *token.FileSet
 	fileBuffer   string
+
+	functionStack []string
+	file          *ast.File
 }
 
 func MakeGoSpeakerDefault() GoSpeaker {
-	return &goSpeaker{}
+	return &goSpeaker{
+		startLine: -1,
+		endLine:   -1,
+	}
 }
 
 func MakeGoSpeaker(quiet bool, verbose bool, skipImports bool, audioOutputFile string) GoSpeaker {
@@ -42,10 +60,27 @@ func MakeGoSpeaker(quiet bool, verbose bool, skipImports bool, audioOutputFile s
 		verboseOutput:   verbose,
 		skipImports:     skipImports,
 		audioOutputFile: audioOutputFile,
+		startLine:       -1,
+		endLine:         -1,
 	}
 }
 
 func (gsp *goSpeaker) SpeakGoFile(filename string) {
+	gsp.LoadFile(filename)
+	gsp.SpeakAll()
+}
+
+func (gsp *goSpeaker) SpeakGoFunction(filename string, function string) {
+	gsp.LoadFile(filename)
+	gsp.SpeakFunction(function)
+}
+
+func (gsp *goSpeaker) SpeakGoString(s string) {
+	gsp.LoadString(s)
+	gsp.SpeakAll()
+}
+
+func (gsp *goSpeaker) LoadFile(filename string) {
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
 		gsp.speak("I can't find the file named " + speakableFilename(filename))
 		fmt.Printf("File %s does not exist\n", filename)
@@ -54,73 +89,133 @@ func (gsp *goSpeaker) SpeakGoFile(filename string) {
 
 	gsp.fileSet = token.NewFileSet() // positions are relative to fset
 
-	f, err := parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
-	if err != nil && f == nil {
+	var err error
+
+	gsp.file, err = parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
+	if err != nil && gsp.file == nil {
 		panic(err)
 	}
 	if err != nil {
 		fmt.Printf("Warning: file had compile errors: %+v\n", err)
 	}
-
-	gsp.speakFile(f)
-
-	gsp.speakBuffer()
 }
 
-func (gsp *goSpeaker) SpeakGoString(s string) {
-
+func (gsp *goSpeaker) LoadString(s string) {
 	gsp.fileBuffer = s
 
 	gsp.fileSet = token.NewFileSet() // positions are relative to fset
 
-	f, err := parser.ParseFile(gsp.fileSet, "buffer", []byte(s), parser.ParseComments)
-	if err != nil && f == nil {
+	var err error
+
+	gsp.file, err = parser.ParseFile(gsp.fileSet, "buffer", []byte(s), parser.ParseComments)
+	if err != nil && gsp.file == nil {
 		panic(err)
 	}
 	if err != nil {
 		fmt.Printf("Warning: file had compile errors: %+v\n", err)
 	}
 
-	gsp.speakFile(f)
+}
+
+func (gsp *goSpeaker) SpeakAll() {
+
+	gsp.speakFile(gsp.file)
 
 	gsp.speakBuffer()
 }
 
-func (gsp *goSpeaker) SpeakGoFunction(filename string, function string) {
+func (gsp *goSpeaker) SpeakFunction(function string) {
 	gsp.targetFunction = function
 
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		gsp.speak("I can't find the file named " + speakableFilename(filename))
-		fmt.Printf("File %s does not exist\n", filename)
-		return
-	}
-
-	gsp.fileSet = token.NewFileSet() // positions are relative to fset
-
-	f, err := parser.ParseFile(gsp.fileSet, filename, nil, parser.ParseComments)
-	if err != nil && f == nil {
-		panic(err)
-	}
-	if err != nil {
-		fmt.Printf("Warning: file had compile errors: %+v", err)
-	}
-
-	gsp.speakFile(f)
+	gsp.speakFile(gsp.file)
 
 	gsp.speakBuffer()
+}
+
+func (gsp *goSpeaker) SpeakRange(start, end int) {
+	gsp.startLine = start
+	gsp.endLine = end
+
+	gsp.speakFile(gsp.file)
+
+	gsp.speakBuffer()
+}
+
+func (gsp *goSpeaker) SetRange(start, end int) {
+	gsp.startLine = start
+	gsp.endLine = end
+}
+
+func (gsp *goSpeaker) SetTargetFunction(function string) {
+	gsp.targetFunction = function
+}
+
+func (gsp *goSpeaker) GetSpeechString() string {
+	return gsp.speechBuffer.String()
+}
+
+func (gsp *goSpeaker) isRanged() bool {
+	return gsp.targetFunction != "" || (gsp.startLine >= 0 && gsp.endLine >= 0)
+}
+
+func (gsp *goSpeaker) isInRange(n ast.Node) bool {
+	if gsp.startLine < 0 || gsp.endLine < 0 {
+		return true
+	}
+
+	if gsp.targetFunction != "" {
+		found := false
+		for i := len(gsp.functionStack); i >= 0; i-- {
+			if gsp.functionStack[i] == gsp.targetFunction {
+				found = true
+			}
+		}
+
+		if !found {
+			return false
+		}
+	}
+
+	startPos := gsp.fileSet.Position(n.Pos())
+	endPos := gsp.fileSet.Position(n.End())
+
+	return (startPos.Line >= gsp.startLine && startPos.Line <= gsp.endLine) ||
+		(endPos.Line >= gsp.startLine && endPos.Line <= gsp.endLine)
+}
+
+func (gsp *goSpeaker) isPosInRange(p token.Pos) bool {
+	if gsp.startLine < 0 || gsp.endLine < 0 {
+		return true
+	}
+
+	pos := gsp.fileSet.Position(p)
+
+	return pos.Line >= gsp.startLine && pos.Line <= gsp.endLine
+}
+
+func (gsp *goSpeaker) isStartInRange(n ast.Node) bool {
+	startPos := gsp.fileSet.Position(n.Pos())
+
+	return startPos.Line >= gsp.startLine && startPos.Line <= gsp.endLine
+}
+
+func (gsp *goSpeaker) isEndInRange(n ast.Node) bool {
+	endPos := gsp.fileSet.Position(n.End())
+
+	return endPos.Line >= gsp.startLine && endPos.Line <= gsp.endLine
 }
 
 func (gsp *goSpeaker) speakFile(file *ast.File) {
 
-	if gsp.targetFunction == "" && file.Name.String() != "" {
+	if file.Name.String() != "" && gsp.isStartInRange(file) {
 		gsp.speak("package " + file.Name.String())
 	}
 
-	if gsp.targetFunction == "" && !gsp.skipImports {
+	if !gsp.skipImports {
 		gsp.speakImportSpecs(file.Imports)
 	}
 
-	if gsp.targetFunction == "" && len(file.Decls) > 0 {
+	if !gsp.isRanged() && gsp.startLine < 0 && len(file.Decls) > 0 {
 		gsp.speak("declarations")
 	}
 
@@ -252,7 +347,7 @@ func (gsp *goSpeaker) speakString(s string) {
 func translateSymbols(symbols []string) []string {
 	newSyms := []string{}
 	for _, sym := range symbols {
-		newSym, ok := symbolTranslations[sym]
+		newSym, ok := symbolTranslations[strings.ToLower(sym)]
 		if ok {
 			sym = newSym
 		}
@@ -299,12 +394,19 @@ func (gsp *goSpeaker) speakImportSpecs(imports []*ast.ImportSpec) {
 	if len(imports) == 0 {
 		return
 	}
-	gsp.speak("imports")
+	spokeImports := false
 
 	for _, imp := range imports {
+		if !gsp.isInRange(imp) {
+			continue
+		}
 		symSpeech := symbolToSpeech(imp.Path.Value)
 		if imp.Name != nil {
 			symSpeech = symSpeech + " as " + symbolToSpeech(imp.Name.String())
+		}
+		if !spokeImports {
+			gsp.speak("imports")
+			spokeImports = true
 		}
 		gsp.speak(symSpeech)
 	}
@@ -314,46 +416,54 @@ func (gsp *goSpeaker) speakValueSpec(vs *ast.ValueSpec, specType string) {
 	if vs.Names != nil && len(vs.Names) > 1 {
 		specType = specType + "s"
 	}
-	gsp.speak(specType)
+	if gsp.isStartInRange(vs) {
+		gsp.speak(specType)
+	}
 	for i := range vs.Names {
-		gsp.speakSymbol(vs.Names[i].String())
-		gsp.speak("of type ")
-		gsp.speakExpr(vs.Type)
+		if gsp.isInRange(vs.Names[i]) {
+			gsp.speakSymbol(vs.Names[i].String())
+			gsp.speak("of type ")
+		}
+		gsp.speakExpr(vs.Type, true)
 		if vs.Values != nil && vs.Values[i] != nil {
-			gsp.speak("equals")
-			gsp.speakExpr(vs.Values[i])
+			if gsp.isInRange(vs.Values[i]) {
+				gsp.speak("equals")
+			}
+			gsp.speakExpr(vs.Values[i], false)
 		}
 	}
 }
 
 func (gsp *goSpeaker) speakTypeSpec(ts *ast.TypeSpec) {
-	gsp.speak("type")
-	gsp.speakSymbol(ts.Name.String())
-	gsp.speak("is")
-	gsp.speakExpr(ts.Type)
+	if gsp.isInRange(ts) {
+		gsp.speak("type")
+		gsp.speakSymbol(ts.Name.String())
+		gsp.speak("is")
+	}
+	gsp.speakExpr(ts.Type, true)
 }
 
 func (gsp *goSpeaker) speakDeclaration(d ast.Decl) {
 	switch v := d.(type) {
 	case *ast.FuncDecl:
-		if gsp.targetFunction != "" && gsp.targetFunction != v.Name.String() {
-			return
-		}
-		gsp.speak("function " + symbolToSpeech(v.Name.String()))
-		if gsp.verboseOutput {
-			fmt.Printf("function name: %s\n", v.Name.String())
-		}
-		if v.Recv != nil && v.Recv.List != nil && len(v.Recv.List) > 0 {
-			gsp.speakFieldList(v.Recv, "with", "receiver")
-		}
+		gsp.functionStack = append(gsp.functionStack, v.Name.String())
 
-		gsp.speakFieldList(v.Type.Params, "taking ", "parameter")
-		gsp.speakFieldList(v.Type.Results, "and returning ", "value")
-		gsp.speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))
-	case *ast.GenDecl:
-		if gsp.targetFunction != "" {
-			return
+		if gsp.isStartInRange(v) {
+			gsp.speak("function " + symbolToSpeech(v.Name.String()))
+			if gsp.verboseOutput {
+				fmt.Printf("function name: %s\n", v.Name.String())
+			}
+			if v.Recv != nil && v.Recv.List != nil && len(v.Recv.List) > 0 {
+				gsp.speakFieldList(v.Recv, "with", "receiver", nil)
+			}
+
+			gsp.speakFieldList(v.Type.Params, "taking ", "parameter", v.Type)
+			gsp.speakFieldList(v.Type.Results, "and returning ", "value", v.Type)
 		}
+		gsp.speakBlockStmt(v.Body, "function body", "end function "+symbolToSpeech(v.Name.String()))
+
+		gsp.functionStack = gsp.functionStack[:len(gsp.functionStack)-1]
+	case *ast.GenDecl:
 		switch v.Tok {
 		case token.CONST:
 			for _, c := range v.Specs {
@@ -369,23 +479,34 @@ func (gsp *goSpeaker) speakDeclaration(d ast.Decl) {
 			}
 		}
 	case *ast.BadDecl:
+		if !gsp.isInRange(v) {
+			return
+		}
 		badDeclText := gsp.getFileString(v.From, v.To)
 		gsp.speak("Bad declaration")
 		gsp.speakSymbol(badDeclText)
 	}
 }
 
-func (gsp *goSpeaker) speakFieldList(fields *ast.FieldList, takeOrRec string, fieldType string) {
+func (gsp *goSpeaker) speakFieldList(fields *ast.FieldList, takeOrRec string, fieldType string, parent ast.Node) {
 	if fields == nil {
-		gsp.speak(takeOrRec + " no " + fieldType + "s")
+		if parent != nil && gsp.isStartInRange(parent) {
+			gsp.speak(takeOrRec + " no " + fieldType + "s")
+		}
 		return
 	}
 	if fields.NumFields() == 0 {
-		gsp.speak(takeOrRec + " no " + fieldType + "s")
+		if gsp.isStartInRange(fields) {
+			gsp.speak(takeOrRec + " no " + fieldType + "s")
+		}
 	} else if fields.NumFields() == 1 {
-		gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType)
+		if gsp.isStartInRange(fields) {
+			gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType)
+		}
 	} else {
-		gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType + "s")
+		if gsp.isStartInRange(fields) {
+			gsp.speak(takeOrRec + strconv.Itoa(fields.NumFields()) + " " + fieldType + "s")
+		}
 	}
 	if fields.List != nil {
 		for _, field := range fields.List {
@@ -400,99 +521,163 @@ func (gsp *goSpeaker) speakField(field *ast.Field) {
 		as = "all as"
 	}
 	for _, fn := range field.Names {
-		gsp.speak(symbolToSpeech(fn.String()))
+		if gsp.isInRange(fn) {
+			gsp.speak(symbolToSpeech(fn.String()))
+		}
 	}
-	gsp.speak(as)
-	gsp.speakExpr(field.Type)
+	if gsp.isInRange(field.Type) {
+		gsp.speak(as)
+		gsp.speakExpr(field.Type, true)
+	}
 	if field.Tag != nil {
-		gsp.speak("with tag")
-		gsp.speakExpr(field.Tag)
+		if gsp.isInRange(field.Tag) {
+			gsp.speak("with tag")
+		}
+		gsp.speakExpr(field.Tag, true)
 	}
 }
 
-func (gsp *goSpeaker) speakExpr(expr ast.Expr) {
+func (gsp *goSpeaker) speakExpr(expr ast.Expr, isDecl bool) {
 	if expr == nil {
 		return
 	}
 	switch v := expr.(type) {
 	case *ast.Ident:
-		gsp.speak(symbolToSpeech(v.String()))
-	case *ast.ArrayType:
-		if v.Len == nil {
-			gsp.speak("slice of")
-		} else {
-			gsp.speakExpr(v.Len)
-			gsp.speak("element")
-			gsp.speak("array of")
+		if gsp.isInRange(v) {
+			gsp.speak(symbolToSpeech(v.String()))
 		}
-		gsp.speakExpr(v.Elt)
+	case *ast.ArrayType:
+		if gsp.isInRange(v) {
+			if v.Len == nil {
+				gsp.speak("slice of")
+			} else {
+				gsp.speakExpr(v.Len, isDecl)
+				if gsp.isEndInRange(v.Len) {
+					gsp.speak("element")
+					gsp.speak("array of")
+				}
+			}
+		}
+		gsp.speakExpr(v.Elt, isDecl)
 	case *ast.StarExpr:
-		gsp.speak("pointer to")
-		gsp.speakExpr(v.X)
+		if gsp.isInRange(v) {
+			if isDecl {
+				gsp.speak("pointer to")
+			} else {
+				gsp.speak("contents of ")
+			}
+		}
+		gsp.speakExpr(v.X, isDecl)
 	case *ast.MapType:
-		gsp.speak("map with ")
-		gsp.speakExpr(v.Key)
-		gsp.speak("key and ")
-		gsp.speakExpr(v.Value)
-		gsp.speak("value")
+		if gsp.isStartInRange(v) {
+			gsp.speak("map")
+		}
+		if gsp.isStartInRange(v.Key) {
+			gsp.speak("with ")
+		}
+		gsp.speakExpr(v.Key, isDecl)
+		if gsp.isEndInRange(v.Key) {
+			gsp.speak("key")
+		}
+		if gsp.isStartInRange(v.Value) {
+			gsp.speak("and ")
+		}
+		gsp.speakExpr(v.Value, isDecl)
+		if gsp.isEndInRange(v.Value) {
+			gsp.speak("value")
+		}
 	case *ast.SelectorExpr:
-		gsp.speakExpr(v.X)
-		gsp.speak("dot")
-		gsp.speakExpr(v.Sel)
+		gsp.speakExpr(v.X, isDecl)
+		if gsp.isInRange(v.Sel) {
+			gsp.speak("dot")
+		}
+		gsp.speakExpr(v.Sel, isDecl)
 	case *ast.BinaryExpr:
-		gsp.speakExpr(v.X)
-		gsp.speakBinaryOp(v.Op.String())
-		gsp.speakExpr(v.Y)
+		gsp.speakExpr(v.X, isDecl)
+		if gsp.isPosInRange(v.OpPos) {
+			gsp.speakBinaryOp(v.Op.String())
+		}
+		gsp.speakExpr(v.Y, isDecl)
 	case *ast.ParenExpr:
-		gsp.speak("left paren")
-		gsp.speakExpr(v.X)
-		gsp.speak("right paren")
+		if gsp.isPosInRange(v.Lparen) {
+			gsp.speak("left paren")
+		}
+		gsp.speakExpr(v.X, isDecl)
+		if gsp.isPosInRange(v.Rparen) {
+			gsp.speak("right paren")
+		}
 	case *ast.CallExpr:
 		gsp.speakFunctionCall(v)
 	case *ast.UnaryExpr:
-		if v.Op.IsOperator() {
+		if v.Op.IsOperator() && gsp.isPosInRange(v.OpPos) {
 			gsp.speakUnaryOp(v.Op.String())
 		}
-		gsp.speakExpr(v.X)
+		gsp.speakExpr(v.X, isDecl)
 	case *ast.BasicLit:
-		gsp.speakString(v.Value)
-	case *ast.SliceExpr:
-		gsp.speak("slice")
-		gsp.speakExpr(v.X)
-		gsp.speak("from")
-		if v.Low != nil {
-			gsp.speakExpr(v.Low)
-		} else {
-			gsp.speak("start")
+		if gsp.isStartInRange(v) {
+			gsp.speakString(v.Value)
 		}
-		gsp.speak("to")
-		if v.High != nil {
-			gsp.speakExpr(v.High)
+	case *ast.SliceExpr:
+		if gsp.isStartInRange(v) {
+			gsp.speak("slice")
+		}
+		gsp.speakExpr(v.X, isDecl)
+		if gsp.isPosInRange(v.Lbrack) {
+			gsp.speak("from")
+		}
+		if v.Low != nil {
+			gsp.speakExpr(v.Low, isDecl)
 		} else {
-			gsp.speak("end")
+			if gsp.isPosInRange(v.Lbrack) {
+				gsp.speak("start")
+			}
+		}
+
+		if v.High != nil {
+			if gsp.isInRange(v.High) {
+				gsp.speak("to")
+			}
+			gsp.speakExpr(v.High, isDecl)
+		} else {
+			if !v.Slice3 && gsp.isPosInRange(v.Rbrack) {
+				gsp.speak("to end")
+			} else if gsp.isInRange(v.Max) {
+				gsp.speak("to end")
+			}
 		}
 		if v.Slice3 {
-			gsp.speak("with cap ")
-			gsp.speakExpr(v.Max)
+			if gsp.isInRange(v.Max) {
+				gsp.speak("with cap ")
+			}
+			gsp.speakExpr(v.Max, isDecl)
 		}
 	case *ast.CompositeLit:
-		gsp.speakCompositeLit(v)
+		gsp.speakCompositeLit(v, isDecl)
 
 	case *ast.KeyValueExpr:
-		gsp.speakExpr(v.Key)
-		gsp.speak("colon	")
-		gsp.speakExpr(v.Value)
+		if gsp.isInRange(v.Key) {
+			gsp.speak("key")
+		}
+		gsp.speakExpr(v.Key, isDecl)
+		if gsp.isInRange(v.Value) {
+			gsp.speak("with value	")
+		}
+		gsp.speakExpr(v.Value, isDecl)
 
 	case *ast.FuncLit:
-		gsp.speak("lambda")
-		gsp.speakFieldList(v.Type.Params, "taking", "parameter")
-		gsp.speakFieldList(v.Type.Results, "and returning", "value")
+		if gsp.isStartInRange(v) {
+			gsp.speak("lambda")
+		}
+		gsp.speakFieldList(v.Type.Params, "taking", "parameter", v.Type)
+		gsp.speakFieldList(v.Type.Results, "and returning", "value", v.Type)
 		gsp.speakBlockStmt(v.Body, "is", "end lambda")
 
 	case *ast.IndexExpr:
-		gsp.speakExpr(v.X)
-		gsp.speak("sub")
-		gsp.speakExpr(v.Index)
+		gsp.speakExpr(v.X, isDecl)
+		if gsp.isPosInRange(v.Lbrack) {
+			gsp.speak("sub")
+		}
+		gsp.speakExpr(v.Index, isDecl)
 
 	case *ast.InterfaceType:
 		gsp.speakInterfaceType(v)
@@ -501,99 +686,135 @@ func (gsp *goSpeaker) speakExpr(expr ast.Expr) {
 		gsp.speakStructType(v)
 
 	case *ast.TypeAssertExpr:
-		gsp.speakExpr(v.X)
-		gsp.speak("as type")
-		gsp.speakExpr(v.Type)
+		gsp.speakExpr(v.X, isDecl)
+		if v.Type != nil && gsp.isStartInRange(v.Type) || (v.X != nil && gsp.isEndInRange(v.X)) {
+			gsp.speak("as type")
+		}
+		gsp.speakExpr(v.Type, false)
 
 	case *ast.ChanType:
 		if v.Dir == ast.SEND {
-			gsp.speak("send to channel")
-			gsp.speakExpr(v.Value)
+			if gsp.isPosInRange(v.Arrow) {
+				gsp.speak("send to channel")
+			}
+			gsp.speakExpr(v.Value, isDecl)
 		} else {
-			gsp.speak("received from channel")
-			gsp.speakExpr(v.Value)
+			if gsp.isPosInRange(v.Arrow) {
+				gsp.speak("received from channel")
+			}
+			gsp.speakExpr(v.Value, isDecl)
 		}
 
 	case *ast.Ellipsis:
 		if v.Elt != nil {
-			gsp.speak("variable number of")
-			gsp.speakExpr(v.Elt)
+			if gsp.isStartInRange(v) {
+				gsp.speak("variable number of")
+			}
+			gsp.speakExpr(v.Elt, isDecl)
 		} else {
-			gsp.speak("variable number")
+			if gsp.isInRange(v) {
+				gsp.speak("variable number")
+			}
 		}
 
 	case *ast.FuncType:
-		gsp.speak("function")
-		gsp.speakFieldList(v.Params, "taking ", "parameter")
-		gsp.speakFieldList(v.Results, "and returning ", "value")
+		if gsp.isStartInRange(v) {
+			gsp.speak("function")
+		}
+		gsp.speakFieldList(v.Params, "taking ", "parameter", v)
+		gsp.speakFieldList(v.Results, "and returning ", "value", v)
 
 	case *ast.BadExpr:
 		badDeclText := gsp.getFileString(v.From, v.To)
-		gsp.speak("Bad expression")
+		if gsp.isStartInRange(v) {
+			gsp.speak("Bad expression")
+		}
 		gsp.speakSymbol(badDeclText)
 	}
 }
 
-func (gsp *goSpeaker) speakCompositeLit(c *ast.CompositeLit) {
+func (gsp *goSpeaker) speakCompositeLit(c *ast.CompositeLit, isDecl bool) {
 	if len(c.Elts) == 0 {
-		gsp.speak("empty")
+		if gsp.isStartInRange(c) {
+			gsp.speak("empty")
+		}
 	}
 	if c.Type != nil {
-		gsp.speakExpr(c.Type)
+		gsp.speakExpr(c.Type, isDecl)
 	}
 	if len(c.Elts) > 0 {
-		gsp.speak("containing")
+		if gsp.isPosInRange(c.Lbrace) {
+			gsp.speak("containing")
+		}
 	}
 	first := true
 	for _, e := range c.Elts {
 		if !first {
-			gsp.speak("comma")
+			if gsp.isStartInRange(e) {
+				gsp.speak("comma")
+			}
 		} else {
 			first = false
 		}
-		gsp.speakExpr(e)
+		gsp.speakExpr(e, isDecl)
 	}
 }
 
 func (gsp *goSpeaker) speakInterfaceType(iface *ast.InterfaceType) {
 	if iface.Methods == nil || iface.Methods.List == nil || len(iface.Methods.List) == 0 {
-		gsp.speak("empty interface")
+		if gsp.isInRange(iface) {
+			gsp.speak("empty interface")
+		}
 	} else {
-		gsp.speak("interface")
-		gsp.speakFieldList(iface.Methods, "having", "method")
+		if gsp.isInRange(iface) {
+			gsp.speak("interface")
+		}
+		gsp.speakFieldList(iface.Methods, "having", "method", iface)
 	}
 }
 
 func (gsp *goSpeaker) speakStructType(s *ast.StructType) {
 	if s.Fields == nil || s.Fields.List == nil || len(s.Fields.List) == 0 {
-		gsp.speak("empty struct")
+		if gsp.isStartInRange(s) {
+			gsp.speak("empty struct")
+		}
 	} else {
-		gsp.speak("struct")
-		gsp.speakFieldList(s.Fields, "having", "field")
+		if gsp.isStartInRange(s) {
+			gsp.speak("struct")
+		}
+		gsp.speakFieldList(s.Fields, "having", "field", s)
 	}
 }
 
 func (gsp *goSpeaker) speakFunctionCall(c *ast.CallExpr) {
 	if len(c.Args) == 0 {
-		gsp.speak("call")
+		if gsp.isStartInRange(c) {
+			gsp.speak("call")
+		}
 	}
-	gsp.speakExpr(c.Fun)
+	gsp.speakExpr(c.Fun, false)
 	if len(c.Args) > 0 {
-		gsp.speak("of")
+		if gsp.isPosInRange(c.Lparen) {
+			gsp.speak("of")
+		}
 	}
 	spokeEllipsis := false
 	first := true
 	for _, a := range c.Args {
 		if !first {
-			gsp.speak("comma	")
+			if gsp.isStartInRange(a) {
+				gsp.speak("comma	")
+			}
 		} else {
 			first = false
 		}
 		if c.Ellipsis != token.NoPos && c.Ellipsis < a.Pos() && !spokeEllipsis {
-			gsp.speak("ellipsis")
+			if gsp.isPosInRange(c.Ellipsis) {
+				gsp.speak("ellipsis")
+			}
 			spokeEllipsis = true
 		}
-		gsp.speakExpr(a)
+		gsp.speakExpr(a, false)
 	}
 }
 
@@ -644,64 +865,92 @@ func (gsp *goSpeaker) speakUnaryOp(op string) {
 }
 
 func (gsp *goSpeaker) speakBlockStmt(stmts *ast.BlockStmt, bodyStart string, bodyEnd string) {
-	gsp.speak(bodyStart)
+	if gsp.isStartInRange(stmts) {
+		gsp.speak(bodyStart)
+	}
 	for _, bs := range stmts.List {
 		gsp.speakStmt(bs)
 	}
-	gsp.speak(bodyEnd)
+	if gsp.isEndInRange(stmts) {
+		gsp.speak(bodyEnd)
+	}
 }
 
 func (gsp *goSpeaker) speakStmt(stmt ast.Stmt) {
 	switch v := stmt.(type) {
 	case *ast.BlockStmt:
-		gsp.speak("begin block")
+		if gsp.isInRange(stmt) {
+			gsp.speak("begin block")
+		}
 		for _, bs := range v.List {
 			gsp.speakStmt(bs)
 		}
-		gsp.speak("end block")
+		if gsp.isInRange(stmt) {
+			gsp.speak("end block")
+		}
 	case *ast.IfStmt:
 		gsp.speakIfStatement(v)
 	case *ast.ForStmt:
 		gsp.speakForLoop(v)
 	case *ast.RangeStmt:
-		gsp.speak("range over ")
-		gsp.speakExpr(v.X)
-		gsp.speak("with")
+		if gsp.isStartInRange(v) {
+			gsp.speak("range over ")
+		}
+		gsp.speakExpr(v.X, false)
+		if (v.Key != nil && gsp.isStartInRange(v.Key)) || (v.Key == nil && v.Value != nil &&
+			gsp.isStartInRange(v.Value)) {
+			gsp.speak("with")
+		}
 		if v.Key != nil {
-			gsp.speak("key")
-			gsp.speakExpr(v.Key)
+			if gsp.isStartInRange(v.Key) {
+				gsp.speak("key")
+			}
+			gsp.speakExpr(v.Key, false)
 			if v.Value != nil {
-				gsp.speak("and")
+				if gsp.isStartInRange(v.Value) {
+					gsp.speak("and")
+				}
 			}
 		}
 		if v.Value != nil {
-			gsp.speak("value")
-			gsp.speakExpr(v.Value)
+			if gsp.isInRange(v.Value) {
+				gsp.speak("value")
+			}
+			gsp.speakExpr(v.Value, false)
 		}
 		if v.Body != nil {
 			gsp.speakBlockStmt(v.Body, "range body", "end range")
 		}
 	case *ast.ReturnStmt:
-		gsp.speak("return")
+		if gsp.isStartInRange(v) {
+			gsp.speak("return")
+		}
+
 		first := true
 		for _, e := range v.Results {
 			if !first {
-				gsp.speak("also")
+				if gsp.isStartInRange(e) {
+					gsp.speak("also")
+				}
 			} else {
 				first = false
 			}
-			gsp.speakExpr(e)
+			gsp.speakExpr(e, false)
 		}
 	case *ast.AssignStmt:
 		gsp.speakAssignStatement(v)
 
 	case *ast.ExprStmt:
-		gsp.speakExpr(v.X)
+		gsp.speakExpr(v.X, false)
 
 	case *ast.BranchStmt:
-		gsp.speak(v.Tok.String())
+		if gsp.isStartInRange(v) {
+			gsp.speak(v.Tok.String())
+		}
 		if v.Label != nil {
-			gsp.speak("at")
+			if gsp.isInRange(v.Label) {
+				gsp.speak("at")
+			}
 			gsp.speakSymbol(v.Label.String())
 		}
 	case *ast.SwitchStmt:
@@ -717,41 +966,57 @@ func (gsp *goSpeaker) speakStmt(stmt ast.Stmt) {
 		gsp.speakSwitchCase(v)
 
 	case *ast.DeferStmt:
-		gsp.speak("defer")
-		gsp.speakExpr(v.Call)
+		if gsp.isStartInRange(v) {
+			gsp.speak("defer")
+		}
+		gsp.speakExpr(v.Call, false)
 
 	case *ast.GoStmt:
-		gsp.speak("go")
-		gsp.speakExpr(v.Call)
+		if gsp.isStartInRange(v) {
+			gsp.speak("go")
+		}
+		gsp.speakExpr(v.Call, false)
 
 	case *ast.EmptyStmt:
-		gsp.speak("empty")
+		if gsp.isInRange(v) {
+			gsp.speak("empty")
+		}
 
 	case *ast.IncDecStmt:
-		if v.Tok == token.INC {
-			gsp.speak("increment")
-		} else {
-			gsp.speak("decrement")
+		if gsp.isStartInRange(v) {
+			if v.Tok == token.INC {
+				gsp.speak("increment")
+			} else {
+				gsp.speak("decrement")
+			}
 		}
-		gsp.speakExpr(v.X)
+		gsp.speakExpr(v.X, false)
 
 	case *ast.LabeledStmt:
-		gsp.speak("label")
-		gsp.speakSymbol(v.Label.String())
+		if gsp.isStartInRange(v) {
+			gsp.speak("label")
+			gsp.speakSymbol(v.Label.String())
+		}
 		gsp.speakStmt(v.Stmt)
 
 	case *ast.SelectStmt:
 		gsp.speakSelectStatement(v)
 
 	case *ast.SendStmt:
-		gsp.speak("send")
-		gsp.speakExpr(v.Value)
-		gsp.speak("to channel")
-		gsp.speakExpr(v.Chan)
+		if gsp.isStartInRange(v) {
+			gsp.speak("send")
+		}
+		gsp.speakExpr(v.Value, false)
+		if gsp.isInRange(v.Chan) {
+			gsp.speak("to channel")
+		}
+		gsp.speakExpr(v.Chan, false)
 
 	case *ast.BadStmt:
 		badDeclText := gsp.getFileString(v.From, v.To)
-		gsp.speak("Bad statement")
+		if gsp.isStartInRange(v) {
+			gsp.speak("Bad statement")
+		}
 		gsp.speakSymbol(badDeclText)
 
 	case *ast.DeclStmt:
@@ -760,39 +1025,53 @@ func (gsp *goSpeaker) speakStmt(stmt ast.Stmt) {
 }
 
 func (gsp *goSpeaker) speakAssignStatement(s *ast.AssignStmt) {
-	gsp.speak("let")
+	if gsp.isStartInRange(s) {
+		gsp.speak("let")
+	}
 	if len(s.Lhs) > 1 && len(s.Lhs) == len(s.Rhs) {
 		for i := range s.Lhs {
-			gsp.speakExpr(s.Lhs[i])
-			gsp.speak("equal")
-			gsp.speakExpr(s.Rhs[i])
+			gsp.speakExpr(s.Lhs[i], false)
+			if gsp.isEndInRange(s.Lhs[i]) {
+				gsp.speak("equal")
+			}
+			gsp.speakExpr(s.Rhs[i], false)
 		}
 	} else {
 		first := true
 		for _, l := range s.Lhs {
 			if !first {
-				gsp.speak("and")
+				if gsp.isStartInRange(l) {
+					gsp.speak("and")
+				}
 			} else {
 				first = false
 			}
-			gsp.speakExpr(l)
+			gsp.speakExpr(l, false)
 		}
-		gsp.speak("equal")
+		if len(s.Rhs) > 0 && gsp.isStartInRange(s.Rhs[0]) {
+			gsp.speak("equal")
+		}
 		for _, r := range s.Rhs {
-			gsp.speakExpr(r)
+			gsp.speakExpr(r, false)
 		}
 	}
 }
 
 func (gsp *goSpeaker) speakIfStatement(s *ast.IfStmt) {
-	gsp.speak("if")
+	if gsp.isStartInRange(s) {
+		gsp.speak("if")
+	}
 	if s.Init != nil {
-		gsp.speak("with initializer ")
+		if gsp.isStartInRange(s.Init) {
+			gsp.speak("with initializer ")
+		}
 		gsp.speakStmt(s.Init)
-		gsp.speak("when")
+		if gsp.isEndInRange(s.Init) {
+			gsp.speak("when")
+		}
 	}
 	if s.Cond != nil {
-		gsp.speakExpr(s.Cond)
+		gsp.speakExpr(s.Cond, false)
 	}
 	if s.Body != nil {
 		bodyEnd := "end if"
@@ -814,20 +1093,28 @@ func (gsp *goSpeaker) speakForLoop(fl *ast.ForStmt) {
 	loopType := "for"
 	if fl.Init == nil && fl.Post == nil {
 		if fl.Cond == nil {
-			gsp.speak("for ever")
+			if gsp.isStartInRange(fl) {
+				gsp.speak("for ever")
+			}
 		} else {
-			gsp.speak("while")
+			if gsp.isStartInRange(fl) {
+				gsp.speak("while")
+			}
 			loopType = "while"
-			gsp.speakExpr(fl.Cond)
+			gsp.speakExpr(fl.Cond, false)
 		}
 	} else {
-		gsp.speak("for")
+		if gsp.isStartInRange(fl) {
+			gsp.speak("for")
+		}
 		if fl.Init == nil {
 			gsp.speakStmt(fl.Init)
 		}
 		if fl.Cond != nil {
-			gsp.speak("while")
-			gsp.speakExpr(fl.Cond)
+			if gsp.isStartInRange(fl.Cond) {
+				gsp.speak("while")
+			}
+			gsp.speakExpr(fl.Cond, false)
 		}
 		if fl.Post != nil {
 			gsp.speakStmt(fl.Post)
@@ -837,35 +1124,49 @@ func (gsp *goSpeaker) speakForLoop(fl *ast.ForStmt) {
 }
 
 func (gsp *goSpeaker) speakSwitchStatement(s *ast.SwitchStmt) {
-	gsp.speak("switch")
+	if gsp.isStartInRange(s) {
+		gsp.speak("switch")
+	}
 	if s.Init != nil {
-		gsp.speak("with initializer")
+		if gsp.isStartInRange(s.Init) {
+			gsp.speak("with initializer")
+		}
 		gsp.speakStmt(s.Init)
 	}
-	gsp.speak("on")
-	gsp.speakExpr(s.Tag)
+	if s.Tag != nil && gsp.isStartInRange(s.Tag) {
+		gsp.speak("on")
+	}
+	gsp.speakExpr(s.Tag, false)
 	gsp.speakBlockStmt(s.Body, "", "end switch")
 
 }
 
 func (gsp *goSpeaker) speakTypeSwitchStatement(s *ast.TypeSwitchStmt) {
-	gsp.speak("switch")
+	if gsp.isStartInRange(s) {
+		gsp.speak("switch")
+	}
 	if s.Init != nil {
-		gsp.speak("with initializer")
+		if gsp.isStartInRange(s.Init) {
+			gsp.speak("with initializer")
+		}
 		gsp.speakStmt(s.Init)
 	}
 
-	gsp.speak("on type")
+	if gsp.isStartInRange(s.Assign) {
+		gsp.speak("on type")
+	}
 	gsp.speakStmt(s.Assign)
 	gsp.speakBlockStmt(s.Body, "", "end type switch")
 
 }
 
 func (gsp *goSpeaker) speakCommClause(c *ast.CommClause) {
-	if c.Comm != nil {
-		gsp.speak("default")
-	} else {
-		gsp.speak("case")
+	if gsp.isStartInRange(c) {
+		if c.Comm != nil {
+			gsp.speak("default")
+		} else {
+			gsp.speak("case")
+		}
 	}
 	gsp.speakStmt(c.Comm)
 	for _, cs := range c.Body {
@@ -874,19 +1175,23 @@ func (gsp *goSpeaker) speakCommClause(c *ast.CommClause) {
 }
 
 func (gsp *goSpeaker) speakSwitchCase(c *ast.CaseClause) {
-	if len(c.List) == 0 {
-		gsp.speak("default")
-	} else {
-		gsp.speak("case")
+	if gsp.isStartInRange(c) {
+		if len(c.List) == 0 {
+			gsp.speak("default")
+		} else {
+			gsp.speak("case")
+		}
 	}
 	first := true
 	for _, e := range c.List {
 		if !first {
-			gsp.speak("or")
+			if gsp.isStartInRange(e) {
+				gsp.speak("or")
+			}
 		} else {
 			first = false
 		}
-		gsp.speakExpr(e)
+		gsp.speakExpr(e, false)
 	}
 	for _, cs := range c.Body {
 		gsp.speakStmt(cs)
@@ -894,7 +1199,9 @@ func (gsp *goSpeaker) speakSwitchCase(c *ast.CaseClause) {
 }
 
 func (gsp *goSpeaker) speakSelectStatement(s *ast.SelectStmt) {
-	gsp.speak("select")
+	if gsp.isStartInRange(s) {
+		gsp.speak("select")
+	}
 	gsp.speakBlockStmt(s.Body, "", "end select")
 
 }

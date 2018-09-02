@@ -991,8 +991,8 @@ func (gsp *goSpeaker) speakStmt(stmt ast.Stmt) {
 		if v.Label != nil {
 			if gsp.isInRange(v.Label) {
 				gsp.speak("at")
+				gsp.speakSymbol(v.Label.String())
 			}
-			gsp.speakSymbol(v.Label.String())
 		}
 	case *ast.SwitchStmt:
 		gsp.speakSwitchStatement(v)
